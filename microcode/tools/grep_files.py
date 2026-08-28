@@ -17,6 +17,7 @@ SKIP_DIRS = {
     "dist",
     "build",
     ".egg-info",
+    ".microcode",
 }
 SKIP_FILES = {".env"}
 MAX_FILES = 2000

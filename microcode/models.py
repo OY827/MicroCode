@@ -8,9 +8,14 @@ from microcode.tooling import ToolRegistry
 from microcode.types import ModelAdapter
 
 
-def create_model_adapter(config: ModelConfig, tools: ToolRegistry) -> ModelAdapter:
+def create_model_adapter(
+    config: ModelConfig,
+    tools: ToolRegistry,
+    *,
+    stream: bool = True,
+) -> ModelAdapter:
     if not config.is_configured:
         return MockModelAdapter()
     if resolve_protocol(config) == "anthropic":
-        return AnthropicModelAdapter(config, tools)
-    return OpenAIModelAdapter(config, tools)
+        return AnthropicModelAdapter(config, tools, stream=stream)
+    return OpenAIModelAdapter(config, tools, stream=stream)

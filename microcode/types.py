@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypedDict
+from typing import Any, Callable, Literal, Protocol, TypedDict
 
 
 class ChatMessage(TypedDict, total=False):
@@ -43,4 +43,8 @@ class ModelAdapter(Protocol):
     The agent loop never cares which one it is.
     """
 
-    def next(self, messages: list[ChatMessage]) -> AgentStep: ...
+    def next(
+        self,
+        messages: list[ChatMessage],
+        on_text_delta: Callable[[str], None] | None = None,
+    ) -> AgentStep: ...

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
-from microcode.api_client import post_json
+from microcode.api_client import post_json, post_sse
 from microcode.config import ModelConfig
 from microcode.tooling import ToolRegistry
 from microcode.types import AgentStep, ChatMessage, ToolCall
@@ -63,11 +63,16 @@ def to_openai_messages(messages: list[ChatMessage]) -> list[dict[str, Any]]:
 class OpenAIModelAdapter:
     """OpenAI Chat Completions API, including DeepSeek's default endpoint."""
 
-    def __init__(self, config: ModelConfig, tools: ToolRegistry) -> None:
+    def __init__(self, config: ModelConfig, tools: ToolRegistry, *, stream: bool = True) -> None:
         self.config = config
         self.tools = tools
+        self.stream = stream
 
-    def next(self, messages: list[ChatMessage]) -> AgentStep:
+    def next(
+        self,
+        messages: list[ChatMessage],
+        on_text_delta: Callable[[str], None] | None = None,
+    ) -> AgentStep:
         payload: dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
@@ -84,15 +89,17 @@ class OpenAIModelAdapter:
                 for tool in self.tools.list()
             ],
         }
-        data = post_json(
-            openai_chat_url(self.config.base_url),
-            payload,
-            {
-                "content-type": "application/json",
-                "Authorization": f"Bearer {self.config.api_key}",
-            },
-        )
-        return parse_openai_response(data)
+        url = openai_chat_url(self.config.base_url)
+        headers = {
+            "content-type": "application/json",
+            "Authorization": f"Bearer {self.config.api_key}",
+        }
+        if self.stream:
+            headers["accept"] = "text/event-stream"
+        if self.stream:
+            payload["stream"] = True
+            return consume_openai_stream(post_sse(url, payload, headers), on_text_delta)
+        return parse_openai_response(post_json(url, payload, headers))
 
 
 def parse_openai_response(data: dict[str, Any]) -> AgentStep:
@@ -119,6 +126,65 @@ def parse_openai_response(data: dict[str, Any]) -> AgentStep:
             }
         )
 
+    if calls:
+        return AgentStep(type="tool_calls", content=content, calls=calls)
+    return AgentStep(type="assistant", content=content)
+
+
+def consume_openai_stream(
+    events,
+    on_text_delta: Callable[[str], None] | None = None,
+) -> AgentStep:
+    """Turn OpenAI SSE chunks (or one complete completion) into an AgentStep."""
+
+    content_parts: list[str] = []
+    tools: dict[int, dict[str, str]] = {}
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        choices = event.get("choices") or []
+        if not choices:
+            continue
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        if isinstance(choice.get("message"), dict) and "delta" not in choice:
+            return parse_openai_response(event)
+        delta = choice.get("delta") or {}
+        text = delta.get("content")
+        if isinstance(text, str) and text:
+            content_parts.append(text)
+            if on_text_delta:
+                on_text_delta(text)
+        for raw in delta.get("tool_calls") or []:
+            if not isinstance(raw, dict):
+                continue
+            index = int(raw.get("index") or 0)
+            entry = tools.setdefault(index, {"id": "", "name": "", "arguments": ""})
+            if raw.get("id"):
+                entry["id"] = str(raw["id"])
+            function = raw.get("function") or {}
+            if function.get("name"):
+                entry["name"] += str(function["name"])
+            if function.get("arguments"):
+                entry["arguments"] += str(function["arguments"])
+
+    content = "".join(content_parts).strip()
+    calls: list[ToolCall] = []
+    for index in sorted(tools):
+        entry = tools[index]
+        try:
+            parsed_input = json.loads(entry.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            parsed_input = {}
+        if not isinstance(parsed_input, dict):
+            parsed_input = {}
+        calls.append(
+            {
+                "id": entry.get("id") or "tool-1",
+                "toolName": entry.get("name") or "",
+                "input": parsed_input,
+            }
+        )
     if calls:
         return AgentStep(type="tool_calls", content=content, calls=calls)
     return AgentStep(type="assistant", content=content)

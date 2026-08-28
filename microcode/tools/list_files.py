@@ -5,7 +5,7 @@ from pathlib import Path
 from microcode.tooling import ToolDefinition, ToolResult
 from microcode.workspace import resolve_tool_path
 
-SKIP_NAMES = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".env"}
+SKIP_NAMES = {".git", ".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".env", ".microcode"}
 
 
 def _validate(input_data: dict) -> dict:

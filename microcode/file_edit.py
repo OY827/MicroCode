@@ -4,7 +4,7 @@ from difflib import unified_diff
 from pathlib import Path
 
 from microcode.tooling import ToolContext, ToolResult
-from microcode.workspace import resolve_tool_path
+from microcode.workspace import relative_workspace_path, resolve_tool_path
 
 PROTECTED_NAMES = {".env"}
 PREVIEW_LINE_LIMIT = 80
@@ -37,8 +37,17 @@ def apply_file_change(
     preview = render_unified_diff(input_path, old_content, new_content)
     if context.on_write_preview:
         context.on_write_preview(input_path, preview)
-    if not context.approve(f"Write {input_path}?\n{preview}"):
+    relpath = relative_workspace_path(context.cwd, target)
+    if not context.approve(f"Write {input_path}?\n{preview}", kind="write", key=relpath):
         return ToolResult(ok=False, output=f"User rejected write to {input_path}")
+
+    if context.checkpoint is not None:
+        context.checkpoint.record_target(
+            context.cwd,
+            target,
+            existed=existed,
+            content=old_content,
+        )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(new_content, encoding="utf-8")

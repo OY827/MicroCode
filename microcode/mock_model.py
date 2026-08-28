@@ -31,7 +31,7 @@ class MockModelAdapter:
     and a default explore path so the loop can be tested offline.
     """
 
-    def next(self, messages: list[ChatMessage]) -> AgentStep:
+    def next(self, messages: list[ChatMessage], on_text_delta=None) -> AgentStep:
         tool_result = _last_tool_result(messages)
         if tool_result is not None:
             last_call = _last_tool_name(messages)
@@ -45,6 +45,11 @@ class MockModelAdapter:
                 return AgentStep(
                     type="assistant",
                     content=f"File contents:\n\n{content}",
+                )
+            if last_call == "explore":
+                return AgentStep(
+                    type="assistant",
+                    content=f"Explore summary:\n\n{content}",
                 )
             return AgentStep(
                 type="assistant",
@@ -120,6 +125,18 @@ class MockModelAdapter:
             return AgentStep(
                 type="tool_calls",
                 calls=[{"id": "mock-1", "toolName": "read_file", "input": {"path": path}}],
+            )
+
+        if user_text.startswith("/explore "):
+            return AgentStep(
+                type="tool_calls",
+                calls=[
+                    {
+                        "id": "mock-1",
+                        "toolName": "explore",
+                        "input": {"task": user_text[len("/explore ") :].strip()},
+                    }
+                ],
             )
 
         if user_text.startswith("/ls"):

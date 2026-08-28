@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import subprocess
 
+from microcode.jobs import format_command_output, jobs_from
 from microcode.tooling import ToolDefinition, ToolResult
 from microcode.workspace import resolve_tool_path
 
 DEFAULT_TIMEOUT = 30
 MAX_TIMEOUT = 120
-MAX_OUTPUT_CHARS = 8000
 
 
 def _validate(input_data: dict) -> dict:
@@ -20,24 +20,17 @@ def _validate(input_data: dict) -> dict:
     cwd = input_data.get("cwd")
     if cwd is not None and not isinstance(cwd, str):
         raise ValueError("cwd must be a string")
+    background = input_data.get("background", False)
+    if isinstance(background, str):
+        background = background.strip().lower() in {"1", "true", "yes"}
+    else:
+        background = bool(background)
     return {
         "command": command.strip(),
         "timeout": min(timeout, MAX_TIMEOUT),
         "cwd": cwd,
+        "background": background,
     }
-
-
-def _format_output(stdout: str, stderr: str, returncode: int) -> str:
-    parts = [f"exit_code: {returncode}"]
-    if stdout:
-        parts.extend(["", "stdout:", stdout])
-    if stderr:
-        parts.extend(["", "stderr:", stderr])
-    text = "\n".join(parts).strip()
-    if len(text) > MAX_OUTPUT_CHARS:
-        omitted = len(text) - MAX_OUTPUT_CHARS
-        text = text[:MAX_OUTPUT_CHARS] + f"\n... ({omitted} more chars omitted)"
-    return text
 
 
 def _run(input_data: dict, context) -> ToolResult:
@@ -45,12 +38,24 @@ def _run(input_data: dict, context) -> ToolResult:
     if input_data.get("cwd"):
         workdir = str(resolve_tool_path(context, input_data["cwd"]))
 
+    kind = "background command" if input_data["background"] else "command"
     summary = (
-        f"Run command in {workdir} (timeout {input_data['timeout']}s):\n"
+        f"Run {kind} in {workdir} (timeout {input_data['timeout']}s):\n"
         f"{input_data['command']}"
     )
-    if not context.approve(summary):
+    if not context.approve(summary, kind="command", key=input_data["command"]):
         return ToolResult(ok=False, output=f"User rejected command: {input_data['command']}")
+
+    if input_data["background"]:
+        job = jobs_from(context).start(input_data["command"], workdir)
+        return ToolResult(
+            ok=True,
+            output=(
+                f"started {job.id}\n"
+                f"command: {job.command}\n"
+                "Use await_job with this id to collect stdout/stderr."
+            ),
+        )
 
     try:
         completed = subprocess.run(
@@ -75,7 +80,9 @@ def _run(input_data: dict, context) -> ToolResult:
     except OSError as error:
         return ToolResult(ok=False, output=str(error))
 
-    output = _format_output(completed.stdout.strip(), completed.stderr.strip(), completed.returncode)
+    output = format_command_output(
+        completed.stdout.strip(), completed.stderr.strip(), completed.returncode
+    )
     return ToolResult(ok=completed.returncode == 0, output=output)
 
 
@@ -83,7 +90,9 @@ run_command_tool = ToolDefinition(
     name="run_command",
     description=(
         "Run a shell command in the workspace directory and return stdout/stderr. "
-        "Use this to run tests or scripts after editing files. Default timeout is 30 seconds."
+        "Use this to run tests or scripts after editing files. Default timeout is 30 seconds. "
+        "Set background=true to start the command and return a job id immediately; "
+        "collect output later with await_job."
     ),
     input_schema={
         "type": "object",
@@ -91,6 +100,7 @@ run_command_tool = ToolDefinition(
             "command": {"type": "string"},
             "cwd": {"type": "string"},
             "timeout": {"type": "number"},
+            "background": {"type": "boolean"},
         },
         "required": ["command"],
     },
