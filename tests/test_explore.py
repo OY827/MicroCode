@@ -22,7 +22,14 @@ class ScriptedModel:
 
 def test_explore_registry_is_read_only() -> None:
     names = {tool.name for tool in create_explore_tool_registry().list()}
-    assert names == {"list_files", "read_file", "grep_files"}
+    assert names == {
+        "list_files",
+        "file_tree",
+        "read_file",
+        "grep_files",
+        "find_symbols",
+        "find_references",
+    }
     assert "write_file" not in names
     assert "explore" not in names
 

@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 Kind = Literal["write", "command"]
+PermissionMode = Literal["ask", "yes", "read"]
+PERMISSION_MODES = ("ask", "yes", "read")
+DEFAULT_PERMISSION_MODE = "ask"
 
 
 @dataclass
@@ -101,6 +104,32 @@ def parse_decision(decision: Any) -> tuple[bool, bool]:
     if text in {"y", "yes", "allow"}:
         return True, False
     return False, False
+
+
+def normalize_permission_mode(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in PERMISSION_MODES else DEFAULT_PERMISSION_MODE
+
+
+def parse_mode_command(text: str) -> tuple[str, str]:
+    """Return (action, mode) for a /mode line."""
+
+    rest = text.strip()[len("/mode") :].strip().lower()
+    if not rest:
+        return "show", ""
+    if rest in PERMISSION_MODES:
+        return "set", rest
+    return "help", ""
+
+
+def format_permission_mode(mode: str) -> str:
+    current = normalize_permission_mode(mode)
+    labels = {
+        "ask": "ask — prompt for writes and commands",
+        "yes": "yes — auto-approve writes and commands this session",
+        "read": "read — block writes and commands this session",
+    }
+    return f"permission mode: {labels[current]}"
 
 
 def parse_permissions_command(text: str) -> tuple[str, str, str]:

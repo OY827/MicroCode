@@ -38,8 +38,13 @@ def apply_file_change(
     if context.on_write_preview:
         context.on_write_preview(input_path, preview)
     relpath = relative_workspace_path(context.cwd, target)
-    if not context.approve(f"Write {input_path}?\n{preview}", kind="write", key=relpath):
-        return ToolResult(ok=False, output=f"User rejected write to {input_path}")
+    revised = context.revise_write(input_path, new_content, preview, kind="write", key=relpath)
+    if revised is None:
+        return ToolResult(ok=False, output=context.reject_text(f"write to {input_path}"))
+    edited = revised != new_content
+    new_content = revised
+    if edited:
+        preview = render_unified_diff(input_path, old_content, new_content)
 
     if context.checkpoint is not None:
         context.checkpoint.record_target(
@@ -52,9 +57,10 @@ def apply_file_change(
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(new_content, encoding="utf-8")
     action = "Updated" if existed else "Created"
+    note = " edited before write" if edited else ""
     return ToolResult(
         ok=True,
-        output=f"{action} {input_path} ({len(new_content)} chars)\n\n{preview}",
+        output=f"{action} {input_path} ({len(new_content)} chars){note}\n\n{preview}",
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 
+from microcode.command_guard import argv_for, refuse_command
 from microcode.jobs import format_command_output, jobs_from
 from microcode.tooling import ToolDefinition, ToolResult
 from microcode.workspace import resolve_tool_path
@@ -34,20 +35,25 @@ def _validate(input_data: dict) -> dict:
 
 
 def _run(input_data: dict, context) -> ToolResult:
+    blocked = refuse_command(input_data["command"])
+    if blocked:
+        return ToolResult(ok=False, output=blocked)
+
     workdir = context.cwd
     if input_data.get("cwd"):
         workdir = str(resolve_tool_path(context, input_data["cwd"]))
 
+    argv = argv_for(input_data["command"])
     kind = "background command" if input_data["background"] else "command"
     summary = (
         f"Run {kind} in {workdir} (timeout {input_data['timeout']}s):\n"
         f"{input_data['command']}"
     )
     if not context.approve(summary, kind="command", key=input_data["command"]):
-        return ToolResult(ok=False, output=f"User rejected command: {input_data['command']}")
+        return ToolResult(ok=False, output=context.reject_text(f"command: {input_data['command']}"))
 
     if input_data["background"]:
-        job = jobs_from(context).start(input_data["command"], workdir)
+        job = jobs_from(context).start(input_data["command"], workdir, argv=argv)
         return ToolResult(
             ok=True,
             output=(
@@ -59,8 +65,7 @@ def _run(input_data: dict, context) -> ToolResult:
 
     try:
         completed = subprocess.run(
-            input_data["command"],
-            shell=True,
+            argv,
             cwd=workdir,
             capture_output=True,
             text=True,
@@ -89,10 +94,11 @@ def _run(input_data: dict, context) -> ToolResult:
 run_command_tool = ToolDefinition(
     name="run_command",
     description=(
-        "Run a shell command in the workspace directory and return stdout/stderr. "
+        "Run one program in the workspace (no system shell, no pipes or &&). "
         "Use this to run tests or scripts after editing files. Default timeout is 30 seconds. "
         "Set background=true to start the command and return a job id immediately; "
-        "collect output later with await_job."
+        "collect output later with await_job. "
+        "Destructive git/disk commands are refused."
     ),
     input_schema={
         "type": "object",

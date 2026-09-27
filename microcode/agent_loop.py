@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Callable
 
 from microcode.compact import CompactReport, compact_limit, compact_messages
+from microcode.models import model_label
 from microcode.tooling import ToolContext, ToolRegistry
+from microcode.turn_tape import TurnTape
 from microcode.types import ChatMessage, ModelAdapter, ToolCall
 
 INTERRUPTED_MESSAGE = "Interrupted by user."
@@ -13,6 +15,7 @@ if TYPE_CHECKING:
     from microcode.jobs import JobStore
     from microcode.permissions import PermissionStore
     from microcode.todos import TodoStore
+    from microcode.usage import UsageLedger
 
 
 def run_agent_turn(
@@ -28,6 +31,7 @@ def run_agent_turn(
     on_text_delta: Callable[[str], None] | None = None,
     on_write_preview: Callable[[str, str], None] | None = None,
     on_approve: Callable[[str], Any] | None = None,
+    on_revise_write: Callable[[str, str, str], Any] | None = None,
     on_ask_user: Callable[[str], str] | None = None,
     checkpoint: WriteCheckpoint | None = None,
     compact_max_chars: int | None = None,
@@ -35,6 +39,9 @@ def run_agent_turn(
     permissions: PermissionStore | None = None,
     todos: TodoStore | None = None,
     jobs: JobStore | None = None,
+    usage: UsageLedger | None = None,
+    permission_mode: str = "ask",
+    tape: TurnTape | None = None,
 ) -> list[ChatMessage]:
     """One user task: model <-> tools until the model answers or hits max_steps.
 
@@ -45,9 +52,13 @@ def run_agent_turn(
     max_chars = compact_limit() if compact_max_chars is None else compact_max_chars
 
     for _ in range(max_steps):
-        current_messages, report = compact_messages(current_messages, max_chars=max_chars)
+        current_messages, report = compact_messages(
+            current_messages, max_chars=max_chars, cwd=cwd
+        )
         if report.compacted and on_compact:
             on_compact(report)
+        if report.compacted and tape is not None:
+            tape.record_compact(report.summary())
 
         streamed = False
 
@@ -61,15 +72,31 @@ def run_agent_turn(
 
         try:
             next_step = model.next(current_messages, on_text_delta=emit_delta if on_text_delta else None)
+            if tape is not None:
+                tape.record_model(
+                    model=model_label(model),
+                    step=next_step,
+                    roles=[str(item.get("role", "")) for item in current_messages],
+                )
+            if usage is not None:
+                usage.record(
+                    model=model_label(model),
+                    usage=getattr(next_step, "usage", None),
+                    messages=current_messages,
+                    step=next_step,
+                )
         except KeyboardInterrupt:
             return _interrupt_turn(
                 current_messages,
                 on_assistant_message=on_assistant_message,
                 on_text_delta=on_text_delta,
                 streamed=streamed,
+                tape=tape,
             )
         except Exception as error:  # noqa: BLE001
             fallback = f"Model API error ({type(error).__name__}): {error}"
+            if tape is not None:
+                tape.record_stop("api_error", detail=type(error).__name__)
             if on_assistant_message:
                 on_assistant_message(fallback)
             current_messages.append({"role": "assistant", "content": fallback})
@@ -95,14 +122,17 @@ def run_agent_turn(
                         cwd=cwd,
                         on_write_preview=on_write_preview,
                         on_approve=on_approve,
+                        on_revise_write=on_revise_write,
                         on_ask_user=on_ask_user,
                         checkpoint=checkpoint,
                         permissions=permissions,
                         todos=todos,
                         jobs=jobs,
+                        permission_mode=permission_mode,
                         model=model,
                         on_tool_start=on_tool_start,
                         on_tool_result=on_tool_result,
+                        tape=tape,
                     ),
                 )
             except KeyboardInterrupt:
@@ -113,8 +143,16 @@ def run_agent_turn(
                     streamed=False,
                     pending=call,
                     on_tool_result=on_tool_result,
+                    tape=tape,
                 )
 
+            if tape is not None:
+                tape.record_tool(
+                    name=call["toolName"],
+                    tool_input=call["input"],
+                    ok=result.ok,
+                    output=result.output,
+                )
             if on_tool_result:
                 on_tool_result(call["toolName"], result.output, not result.ok)
 
@@ -137,6 +175,8 @@ def run_agent_turn(
             )
 
     fallback = "Reached the maximum tool step limit for this turn."
+    if tape is not None:
+        tape.record_stop("max_steps")
     if on_assistant_message:
         on_assistant_message(fallback)
     current_messages.append({"role": "assistant", "content": fallback})
@@ -151,6 +191,7 @@ def _interrupt_turn(
     streamed: bool,
     pending: ToolCall | None = None,
     on_tool_result: Callable[[str, str, bool], None] | None = None,
+    tape: TurnTape | None = None,
 ) -> list[ChatMessage]:
     """Close the current turn after Ctrl+C so the REPL can keep the history."""
 
@@ -172,8 +213,12 @@ def _interrupt_turn(
                 "isError": True,
             }
         )
+        if tape is not None:
+            tape.record_stop("interrupted", tool=pending["toolName"])
         if on_tool_result:
             on_tool_result(pending["toolName"], INTERRUPTED_MESSAGE, True)
+    elif tape is not None:
+        tape.record_stop("interrupted")
     if streamed and on_text_delta:
         on_text_delta("\n")
     if on_assistant_message:

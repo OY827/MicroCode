@@ -62,7 +62,7 @@ def _run(input_data: dict, context) -> ToolResult:
         return ToolResult(ok=False, output=reason)
 
     if not context.approve(f"Fetch URL?\n{url}", kind="command", key=f"web_fetch {url}"):
-        return ToolResult(ok=False, output=f"User rejected fetch: {url}")
+        return ToolResult(ok=False, output=context.reject_text(f"fetch: {url}"))
 
     try:
         text, content_type, status = _download(url)

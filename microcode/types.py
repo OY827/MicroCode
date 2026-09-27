@@ -28,12 +28,21 @@ class ToolCall(TypedDict):
 
 
 @dataclass(slots=True)
+class TokenUsage:
+    """Tokens the API reported for one model call. Missing when the provider omitted usage."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(slots=True)
 class AgentStep:
     """What the model decided to do this round: talk, or call tools."""
 
     type: Literal["assistant", "tool_calls"]
     content: str = ""
     calls: list[ToolCall] = field(default_factory=list)
+    usage: TokenUsage | None = None
 
 
 class ModelAdapter(Protocol):

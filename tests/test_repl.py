@@ -4,7 +4,8 @@ from microcode.agent_loop import INTERRUPTED_MESSAGE
 from microcode.repl import handle_local_command, run_repl, run_user_turn
 from microcode.session import SessionStore
 from microcode.tooling import ToolDefinition, ToolRegistry, ToolResult
-from microcode.types import AgentStep, ChatMessage
+from microcode.types import AgentStep, ChatMessage, TokenUsage
+from microcode.usage import UsageLedger
 
 
 class ScriptedModel:
@@ -40,12 +41,32 @@ def test_handle_local_exit_and_help() -> None:
     assert handle_local_command("/exit") == "exit"
     assert handle_local_command("  /QUIT  ") == "exit"
     assert handle_local_command("/help") == "help"
+    assert handle_local_command("/status") == "status"
+    assert handle_local_command("/replay") == "replay"
+    assert handle_local_command("/replay latest") == "replay"
+    assert handle_local_command("/tape") == "tape"
+    assert handle_local_command("/tape 5") == "tape"
+    assert handle_local_command("/tape path") == "tape"
+    assert handle_local_command("/fixture") == "fixture"
+    assert handle_local_command("/model") == "model"
+    assert handle_local_command("/model mock") == "model"
+    assert handle_local_command("/cost") == "cost"
     assert handle_local_command("/session") == "session"
     assert handle_local_command("/sessions") == "sessions"
     assert handle_local_command("/undo") == "undo"
+    assert handle_local_command("/redo") == "redo"
+    assert handle_local_command("/mode") == "mode"
+    assert handle_local_command("/mode read") == "mode"
+    assert handle_local_command("/checkpoints") == "checkpoints"
+    assert handle_local_command("/rewind") == "rewind"
+    assert handle_local_command("/rewind cp_1") == "rewind"
+    assert handle_local_command("/rewind-preview") == "rewind-preview"
+    assert handle_local_command("/rewind-preview cp_1") == "rewind-preview"
     assert handle_local_command("/compact") == "compact"
     assert handle_local_command("/memory") == "memory"
     assert handle_local_command("/memory add Use pytest") == "memory"
+    assert handle_local_command("/memory search pytest") == "memory"
+    assert handle_local_command("/memory maintain") == "memory"
     assert handle_local_command("/skills") == "skills"
     assert handle_local_command("/mcp") == "mcp"
     assert handle_local_command("/permissions") == "permissions"
@@ -53,6 +74,8 @@ def test_handle_local_exit_and_help() -> None:
     assert handle_local_command("/permissions remove write notes.txt") == "permissions"
     assert handle_local_command("/todos") == "todos"
     assert handle_local_command("/jobs") == "jobs"
+    assert handle_local_command("/readiness") == "readiness"
+    assert handle_local_command("/init") == "init"
     assert handle_local_command("list files") is None
 
 
@@ -225,3 +248,37 @@ def test_repl_interrupt_during_turn_then_continues() -> None:
     assert any(
         item["role"] == "assistant" and item["content"] == INTERRUPTED_MESSAGE for item in messages
     )
+
+
+def test_repl_replay_cost_and_model_switch(tmp_path: Path, capsys) -> None:
+    store = SessionStore(tmp_path)
+    session = store.create(str(tmp_path), [{"role": "system", "content": "sys"}])
+    store.save(session)
+    model = ScriptedModel(
+        [AgentStep(type="assistant", content="hi there", usage=TokenUsage(12, 4))]
+    )
+    lines = iter(["hello", "/cost", "/replay", "/model mock", "/model", "/exit"])
+
+    run_repl(
+        model=model,
+        tools=_echo_registry(),
+        messages=session.messages,
+        cwd=str(tmp_path),
+        read_line=lambda: next(lines) + "\n",
+        session=session,
+        store=store,
+        on_assistant_message=lambda _text: None,
+        usage=UsageLedger(),
+    )
+
+    err = capsys.readouterr().err
+    assert "model calls: 1" in err
+    assert "input tokens: 12" in err
+    assert "[1] you" in err
+    assert "hello" in err
+    assert "hi there" in err
+    assert "Switched to offline mock" in err
+    assert "offline mock (not a live network model)" in err
+    loaded = store.load(session.id)
+    assert loaded.model_name == "mock"
+    assert loaded.usage["calls"] == 1

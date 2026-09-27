@@ -59,6 +59,27 @@ def resolve_protocol(config: ModelConfig) -> str:
     return "openai"
 
 
+@dataclass(slots=True, frozen=True)
+class FallbackConfig:
+    api_key: str = ""
+    base_url: str = ""
+    model: str = ""
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key.strip())
+
+
+def load_fallback_config() -> FallbackConfig:
+    """Optional spare model used only when the primary key is missing or invalid."""
+
+    return FallbackConfig(
+        api_key=_nonempty("MICROCODE_FALLBACK_API_KEY"),
+        base_url=_nonempty("MICROCODE_FALLBACK_BASE_URL"),
+        model=_nonempty("MICROCODE_FALLBACK_MODEL"),
+    )
+
+
 def load_model_config() -> ModelConfig:
     load_dotenv()
     try:

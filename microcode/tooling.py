@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from microcode.jobs import JobStore
     from microcode.permissions import Kind, PermissionStore
     from microcode.todos import TodoStore
+    from microcode.turn_tape import TurnTape
     from microcode.types import ModelAdapter
 
 
@@ -18,12 +19,37 @@ class ToolResult:
 
 
 @dataclass(slots=True)
+class WriteDecision:
+    """What to do with a proposed file write. content=None keeps the proposal."""
+
+    allow: bool
+    remember: bool = False
+    content: str | None = None
+
+
+def interpret_write_decision(decision: Any, proposed: str) -> tuple[str | None, bool]:
+    """Return (text to write, remember). None means the write was rejected."""
+
+    if isinstance(decision, WriteDecision):
+        if not decision.allow:
+            return None, False
+        return proposed if decision.content is None else decision.content, decision.remember
+    from microcode.permissions import parse_decision
+
+    allowed, remember = parse_decision(decision)
+    if not allowed:
+        return None, False
+    return proposed, remember
+
+
+@dataclass(slots=True)
 class ToolContext:
     """Runtime facts a tool needs: workspace root, preview, and optional approval."""
 
     cwd: str
     on_write_preview: Callable[[str, str], None] | None = None
     on_approve: Callable[[str], Any] | None = None
+    on_revise_write: Callable[[str, str, str], Any] | None = None
     checkpoint: WriteCheckpoint | None = None
     permissions: PermissionStore | None = None
     todos: TodoStore | None = None
@@ -32,12 +58,19 @@ class ToolContext:
     model: ModelAdapter | None = None
     on_tool_start: Callable[[str, dict], None] | None = None
     on_tool_result: Callable[[str, str, bool], None] | None = None
+    permission_mode: str = "ask"
+    tape: TurnTape | None = None
 
     def approve(self, summary: str, *, kind: Kind | None = None, key: str | None = None) -> bool:
         """Return True when the user allows a write or command. None means auto-approve."""
 
-        from microcode.permissions import parse_decision
+        from microcode.permissions import normalize_permission_mode, parse_decision
 
+        mode = normalize_permission_mode(self.permission_mode)
+        if mode == "read":
+            return False
+        if mode == "yes":
+            return True
         if self.permissions is not None and kind and key and self.permissions.is_allowed(kind, key):
             return True
         if self.on_approve is None:
@@ -47,6 +80,49 @@ class ToolContext:
             if self.permissions.allow(kind, key):
                 self.permissions.save()
         return allowed
+
+    def revise_write(
+        self,
+        path: str,
+        proposed: str,
+        preview: str,
+        *,
+        kind: Kind | None = None,
+        key: str | None = None,
+    ) -> str | None:
+        """Return the text to write, or None when the user rejects the change.
+
+        A revise callback may replace proposed. Remembered allows and --yes / read
+        mode skip the editor and keep the model's text.
+        """
+
+        from microcode.permissions import normalize_permission_mode
+
+        mode = normalize_permission_mode(self.permission_mode)
+        if mode == "read":
+            return None
+        if mode == "yes":
+            return proposed
+        if self.permissions is not None and kind and key and self.permissions.is_allowed(kind, key):
+            return proposed
+        if self.on_revise_write is not None:
+            decision = self.on_revise_write(path, proposed, preview)
+        elif self.on_approve is None:
+            return proposed
+        else:
+            decision = self.on_approve(f"Write {path}?\n{preview}")
+        content, remember = interpret_write_decision(decision, proposed)
+        if content is not None and remember and self.permissions is not None and kind and key:
+            if self.permissions.allow(kind, key):
+                self.permissions.save()
+        return content
+
+    def reject_text(self, what: str) -> str:
+        from microcode.permissions import normalize_permission_mode
+
+        if normalize_permission_mode(self.permission_mode) == "read":
+            return f"Read-only mode: {what} blocked this session."
+        return f"User rejected {what}"
 
     def ask(self, question: str) -> str | None:
         """Return the user's one-line answer, or None when nobody can be asked."""

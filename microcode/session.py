@@ -8,6 +8,10 @@ from pathlib import Path
 from microcode.compact import context_chars
 from microcode.types import ChatMessage
 
+REPLAY_ITEM_LIMIT = 40
+REPLAY_CLIP = 400
+REPLAY_TOOL_CLIP = 200
+
 LATEST_NAME = "latest"
 
 
@@ -27,6 +31,11 @@ class Session:
     updated_at: str
     messages: list[ChatMessage] = field(default_factory=list)
     checkpoint: list[dict] = field(default_factory=list)
+    checkpoints: list[dict] = field(default_factory=list)
+    undone: list[dict] = field(default_factory=list)
+    model_name: str = ""
+    usage: dict = field(default_factory=dict)
+    permission_mode: str = "ask"
 
     def to_dict(self) -> dict:
         return {
@@ -36,11 +45,21 @@ class Session:
             "updated_at": self.updated_at,
             "messages": list(self.messages),
             "checkpoint": list(self.checkpoint),
+            "checkpoints": list(self.checkpoints),
+            "undone": list(self.undone),
+            "model_name": self.model_name,
+            "usage": dict(self.usage),
+            "permission_mode": self.permission_mode,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> Session:
+        from microcode.permissions import normalize_permission_mode
+
         raw_checkpoint = data.get("checkpoint") or []
+        raw_checkpoints = data.get("checkpoints") or []
+        raw_undone = data.get("undone") or []
+        raw_usage = data.get("usage") or {}
         return cls(
             id=str(data["id"]),
             cwd=str(data.get("cwd", "")),
@@ -48,6 +67,11 @@ class Session:
             updated_at=str(data.get("updated_at", "")),
             messages=list(data.get("messages") or []),
             checkpoint=list(raw_checkpoint) if isinstance(raw_checkpoint, list) else [],
+            checkpoints=list(raw_checkpoints) if isinstance(raw_checkpoints, list) else [],
+            undone=list(raw_undone) if isinstance(raw_undone, list) else [],
+            model_name=str(data.get("model_name") or ""),
+            usage=dict(raw_usage) if isinstance(raw_usage, dict) else {},
+            permission_mode=normalize_permission_mode(data.get("permission_mode")),
         )
 
 
@@ -134,6 +158,7 @@ def summarize_session(session: Session) -> str:
         f"chars: {context_chars(session.messages)}",
         f"user_turns: {user_turns}",
         f"undoable: {len(session.checkpoint)}",
+        f"checkpoints: {len(session.checkpoints)}",
     ]
     if preview:
         lines.append(f"last_user: {preview}")
@@ -150,3 +175,69 @@ def summarize_session_list(sessions: list[Session]) -> str:
             f"{session.id}  turns={user_turns}  messages={len(session.messages)}  {session.updated_at}"
         )
     return "\n".join(lines)
+
+
+def _clip(text: object, limit: int) -> str:
+    value = str(text or "").strip() or "(empty)"
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "..."
+
+
+def format_replay(
+    *,
+    messages: list[ChatMessage] | None = None,
+    session: Session | None = None,
+    limit: int = REPLAY_ITEM_LIMIT,
+) -> str:
+    """Plain transcript of this chat. Skips the long system prompt."""
+
+    msgs = list(messages if messages is not None else (session.messages if session is not None else []))
+    visible = [message for message in msgs if message.get("role") != "system"]
+    if not visible:
+        header = f"replay: {session.id}" if session is not None else "replay"
+        return f"{header}\nNo conversation to replay yet.\n"
+
+    lines: list[str] = []
+    if session is not None:
+        lines.extend(
+            [
+                f"replay: {session.id}",
+                f"workspace: {session.cwd}",
+                f"created: {session.created_at}",
+                f"updated: {session.updated_at}",
+            ]
+        )
+        if session.model_name:
+            lines.append(f"model: {session.model_name}")
+    else:
+        lines.append("replay: (unsaved)")
+    lines.append("")
+
+    omitted = 0
+    if len(visible) > limit:
+        omitted = len(visible) - limit
+        visible = visible[-limit:]
+        lines.append(f"... {omitted} earlier item(s) omitted")
+        lines.append("")
+
+    for index, message in enumerate(visible, start=omitted + 1):
+        role = message.get("role")
+        if role == "user":
+            lines.append(f"[{index}] you")
+            lines.append(_clip(message.get("content"), REPLAY_CLIP))
+        elif role == "assistant":
+            lines.append(f"[{index}] assistant")
+            lines.append(_clip(message.get("content"), REPLAY_CLIP))
+        elif role == "assistant_tool_call":
+            lines.append(f"[{index}] tool {message.get('toolName') or '(unknown)'}")
+            lines.append(_clip(json.dumps(message.get("input") or {}, ensure_ascii=False), REPLAY_TOOL_CLIP))
+        elif role == "tool_result":
+            flag = "error" if message.get("isError") else "ok"
+            lines.append(f"[{index}] result [{flag}]")
+            lines.append(_clip(message.get("content"), REPLAY_TOOL_CLIP))
+        else:
+            lines.append(f"[{index}] {role}")
+            lines.append(_clip(message.get("content"), REPLAY_CLIP))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"

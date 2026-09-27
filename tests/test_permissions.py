@@ -1,7 +1,14 @@
 import json
 from pathlib import Path
 
-from microcode.permissions import PermissionStore, parse_decision, parse_permissions_command
+from microcode.permissions import (
+    PermissionStore,
+    format_permission_mode,
+    parse_decision,
+    parse_mode_command,
+    parse_permissions_command,
+)
+from microcode.session import SessionStore
 from microcode.repl import run_repl, run_user_turn
 from microcode.tooling import ToolContext
 from microcode.tools import create_default_tool_registry
@@ -249,3 +256,108 @@ def test_repl_permissions_commands(tmp_path: Path, capsys) -> None:
     reloaded = PermissionStore.load(tmp_path)
     assert reloaded.writes == []
     assert reloaded.commands == []
+
+
+def test_parse_mode_command() -> None:
+    assert parse_mode_command("/mode") == ("show", "")
+    assert parse_mode_command("/mode ask") == ("set", "ask")
+    assert parse_mode_command("/mode yes") == ("set", "yes")
+    assert parse_mode_command("/mode read") == ("set", "read")
+    assert parse_mode_command("/mode weird") == ("help", "")
+    assert "read" in format_permission_mode("read")
+
+
+def test_read_mode_blocks_write_even_if_prompt_would_allow(tmp_path: Path) -> None:
+    tools = create_default_tool_registry()
+    store = PermissionStore.load(tmp_path)
+    store.allow("write", "hello.txt")
+    result = tools.execute(
+        "write_file",
+        {"path": "hello.txt", "content": "nope\n"},
+        ToolContext(
+            cwd=str(tmp_path),
+            on_approve=lambda _summary: True,
+            permissions=store,
+            permission_mode="read",
+        ),
+    )
+    assert not result.ok
+    assert "Read-only mode" in result.output
+    assert "write to hello.txt" in result.output
+    assert not (tmp_path / "hello.txt").exists()
+
+
+def test_yes_mode_skips_prompt(tmp_path: Path) -> None:
+    tools = create_default_tool_registry()
+    asked: list[str] = []
+    result = tools.execute(
+        "write_file",
+        {"path": "hello.txt", "content": "ok\n"},
+        ToolContext(
+            cwd=str(tmp_path),
+            on_approve=lambda summary: asked.append(summary) or False,
+            permission_mode="yes",
+        ),
+    )
+    assert result.ok
+    assert asked == []
+    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "ok\n"
+
+
+def test_repl_mode_command_persists(tmp_path: Path, capsys) -> None:
+    store = SessionStore(tmp_path)
+    session = store.create(str(tmp_path), [{"role": "system", "content": "sys"}])
+    store.save(session)
+    lines = iter(["/mode", "/mode read", "/mode weird", "/mode yes", "/exit"])
+    run_repl(
+        model=ScriptedModel([]),
+        tools=create_default_tool_registry(),
+        messages=session.messages,
+        cwd=str(tmp_path),
+        session=session,
+        store=store,
+        read_line=lambda: next(lines) + "\n",
+        on_assistant_message=lambda _text: None,
+        on_approve=lambda _summary: False,
+    )
+    err = capsys.readouterr().err
+    assert "permission mode: ask" in err
+    assert "block writes and commands" in err
+    assert "Usage:" in err
+    assert "auto-approve" in err
+    loaded = store.load(session.id)
+    assert loaded.permission_mode == "yes"
+
+
+def test_user_turn_honors_session_read_mode(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    session = store.create(str(tmp_path), [{"role": "system", "content": "sys"}])
+    session.permission_mode = "read"
+    store.save(session)
+    asked: list[str] = []
+    run_user_turn(
+        model=ScriptedModel(
+            [
+                AgentStep(
+                    type="tool_calls",
+                    calls=[
+                        {
+                            "id": "1",
+                            "toolName": "write_file",
+                            "input": {"path": "notes.txt", "content": "hi\n"},
+                        }
+                    ],
+                ),
+                AgentStep(type="assistant", content="done"),
+            ]
+        ),
+        tools=create_default_tool_registry(),
+        messages=session.messages,
+        user_text="write notes",
+        cwd=str(tmp_path),
+        session=session,
+        store=store,
+        on_approve=lambda summary: asked.append(summary) or True,
+    )
+    assert asked == []
+    assert not (tmp_path / "notes.txt").exists()

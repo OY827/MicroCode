@@ -7,6 +7,7 @@ from microcode.api_client import post_json, post_sse
 from microcode.config import ModelConfig
 from microcode.tooling import ToolRegistry
 from microcode.types import AgentStep, ChatMessage, ToolCall
+from microcode.usage import usage_from_openai
 
 
 def openai_chat_url(base_url: str) -> str:
@@ -98,6 +99,7 @@ class OpenAIModelAdapter:
             headers["accept"] = "text/event-stream"
         if self.stream:
             payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
             return consume_openai_stream(post_sse(url, payload, headers), on_text_delta)
         return parse_openai_response(post_json(url, payload, headers))
 
@@ -126,9 +128,10 @@ def parse_openai_response(data: dict[str, Any]) -> AgentStep:
             }
         )
 
+    usage = usage_from_openai(data)
     if calls:
-        return AgentStep(type="tool_calls", content=content, calls=calls)
-    return AgentStep(type="assistant", content=content)
+        return AgentStep(type="tool_calls", content=content, calls=calls, usage=usage)
+    return AgentStep(type="assistant", content=content, usage=usage)
 
 
 def consume_openai_stream(
@@ -139,10 +142,14 @@ def consume_openai_stream(
 
     content_parts: list[str] = []
     tools: dict[int, dict[str, str]] = {}
+    usage = None
 
     for event in events:
         if not isinstance(event, dict):
             continue
+        found = usage_from_openai(event)
+        if found is not None:
+            usage = found
         choices = event.get("choices") or []
         if not choices:
             continue
@@ -186,5 +193,5 @@ def consume_openai_stream(
             }
         )
     if calls:
-        return AgentStep(type="tool_calls", content=content, calls=calls)
-    return AgentStep(type="assistant", content=content)
+        return AgentStep(type="tool_calls", content=content, calls=calls, usage=usage)
+    return AgentStep(type="assistant", content=content, usage=usage)

@@ -109,14 +109,14 @@ class JobStore:
     _jobs: dict[str, Job] = field(default_factory=dict)
     _next_id: int = 1
 
-    def start(self, command: str, cwd: str) -> Job:
+    def start(self, command: str, cwd: str, *, argv: list[str] | None = None) -> Job:
         out_fd, out_name = tempfile.mkstemp(prefix="microcode-job-out-")
         err_fd, err_name = tempfile.mkstemp(prefix="microcode-job-err-")
         out_handle = os.fdopen(out_fd, "wb")
         err_handle = os.fdopen(err_fd, "wb")
         proc = subprocess.Popen(
-            command,
-            shell=True,
+            argv if argv else command,
+            shell=argv is None,
             cwd=cwd,
             stdout=out_handle,
             stderr=err_handle,

@@ -1,6 +1,16 @@
+import os
+import time
 from pathlib import Path
 
-from microcode.compact import COMPACT_PREFIX, compact_messages, context_chars
+from microcode.compact import (
+    COMPACT_HINT,
+    COMPACT_PREFIX,
+    RESULTS_DIR,
+    cleanup_tool_results,
+    compact_messages,
+    context_chars,
+)
+from microcode.prompt import build_system_prompt
 from microcode.repl import run_repl, run_user_turn
 from microcode.session import SessionStore, summarize_session
 from microcode.tooling import ToolDefinition, ToolRegistry, ToolResult
@@ -56,7 +66,7 @@ def _history_with_old_tool_result(blob: str) -> list[ChatMessage]:
 
 
 def test_compact_shrinks_old_tool_result_keeps_system_and_recent() -> None:
-    blob = "x" * 2000
+    blob = "HEADMARK" + ("x" * 2000) + "TAILMARK"
     messages, report = compact_messages(
         _history_with_old_tool_result(blob),
         max_chars=500,
@@ -65,9 +75,12 @@ def test_compact_shrinks_old_tool_result_keeps_system_and_recent() -> None:
     assert report.after < report.before
     assert messages[0] == {"role": "system", "content": "sys"}
     assert messages[-1]["content"] == "new task"
-    assert str(messages[3]["content"]).startswith(COMPACT_PREFIX)
-    assert "2000 chars" in str(messages[3]["content"])
-    assert str(messages[3]["content"]) != blob
+    stub = str(messages[3]["content"])
+    assert stub.startswith(COMPACT_PREFIX)
+    assert "2000 chars" in stub or f"{len(blob)} chars" in stub
+    assert "HEADMARK" in stub
+    assert "TAILMARK" in stub
+    assert stub != blob
 
 
 def test_under_threshold_is_noop() -> None:
@@ -136,7 +149,7 @@ def test_large_tool_call_input_is_compacted() -> None:
     assert compacted_input["original_chars"] > 400
 
 
-def test_run_user_turn_compacts_before_model_sees_history() -> None:
+def test_run_user_turn_compacts_before_model_sees_history(tmp_path: Path) -> None:
     blob = "q" * 2000
     history = [
         {"role": "system", "content": "sys"},
@@ -156,7 +169,7 @@ def test_run_user_turn_compacts_before_model_sees_history() -> None:
         tools=_echo_registry(),
         messages=history,
         user_text="next",
-        cwd=".",
+        cwd=str(tmp_path),
         compact_max_chars=800,
         on_compact=lambda report: reports.append(report.summary()),
     )
@@ -164,6 +177,43 @@ def test_run_user_turn_compacts_before_model_sees_history() -> None:
     old_result = next(message for message in seen if message.get("role") == "tool_result")
     assert str(old_result["content"]).startswith(COMPACT_PREFIX)
     assert reports and "compacted" in reports[0]
+
+
+def test_tool_result_is_spilled_to_disk(tmp_path: Path) -> None:
+    blob = "HEADMARK" + ("body " * 400) + "TAILMARK"
+    messages, report = compact_messages(
+        _history_with_old_tool_result(blob),
+        max_chars=500,
+        cwd=str(tmp_path),
+    )
+    stub = str(messages[3]["content"])
+    assert report.spilled == 1
+    assert "saved .microcode/tool-results/" in stub
+    saved = list((tmp_path / RESULTS_DIR).glob("*.txt"))
+    assert len(saved) == 1
+    assert saved[0].read_text(encoding="utf-8") == blob
+    assert "HEADMARK" in stub
+    assert "TAILMARK" in stub
+
+
+def test_old_user_text_keeps_head_and_tail() -> None:
+    old = "START" + ("m" * 800) + "ENDMARK"
+    messages, report = compact_messages(
+        [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": old},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "now"},
+        ],
+        max_chars=100,
+        force=True,
+    )
+    assert report.compacted >= 1
+    stub = str(messages[1]["content"])
+    assert stub.startswith(COMPACT_PREFIX)
+    assert "START" in stub
+    assert "ENDMARK" in stub
+    assert messages[-1]["content"] == "now"
 
 
 def test_repl_compact_command_persists(tmp_path: Path) -> None:
@@ -183,9 +233,58 @@ def test_repl_compact_command_persists(tmp_path: Path) -> None:
         read_line=lambda: next(lines) + "\n",
     )
 
-    assert str(messages[3]["content"]).startswith(COMPACT_PREFIX)
+    stub = str(messages[3]["content"])
+    assert stub.startswith(COMPACT_PREFIX)
+    assert "saved .microcode/tool-results/" in stub
     loaded = store.load(session.id)
     assert str(loaded.messages[3]["content"]).startswith(COMPACT_PREFIX)
     assert loaded.checkpoint == []
     assert "chars:" in summarize_session(loaded)
     assert context_chars(loaded.messages) < 2000 + 100
+    spilled = list((tmp_path / RESULTS_DIR).glob("*.txt"))
+    assert len(spilled) == 1
+    assert spilled[0].read_text(encoding="utf-8") == blob
+
+
+def test_system_prompt_tells_model_to_reread_compacted_files(tmp_path: Path) -> None:
+    prompt = build_system_prompt("You are MicroCode.", str(tmp_path))
+    assert COMPACT_HINT in prompt
+    assert "read_file" in prompt
+    assert ".microcode/tool-results" in prompt
+
+
+def test_cleanup_drops_old_and_excess_tool_results(tmp_path: Path) -> None:
+    folder = tmp_path / RESULTS_DIR
+    folder.mkdir(parents=True)
+    old = folder / "old.txt"
+    extra = folder / "extra.txt"
+    keep = folder / "keep.txt"
+    old.write_text("old", encoding="utf-8")
+    extra.write_text("extra", encoding="utf-8")
+    keep.write_text("keep", encoding="utf-8")
+    now = time.time()
+    os.utime(old, (now - 10 * 86400, now - 10 * 86400))
+    os.utime(extra, (now - 100, now - 100))
+    os.utime(keep, (now, now))
+    removed = cleanup_tool_results(str(tmp_path), keep_days=7, keep_latest=1)
+    assert removed == 2
+    assert keep.is_file()
+    assert not old.exists()
+    assert not extra.exists()
+
+
+def test_compact_messages_cleans_old_spills(tmp_path: Path) -> None:
+    folder = tmp_path / RESULTS_DIR
+    folder.mkdir(parents=True)
+    stale = folder / "stale.txt"
+    stale.write_text("stale", encoding="utf-8")
+    old_time = time.time() - 10 * 86400
+    os.utime(stale, (old_time, old_time))
+    _, report = compact_messages(
+        [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+        cwd=str(tmp_path),
+    )
+    assert report.cleaned == 1
+    assert report.compacted == 0
+    assert not stale.exists()
+    assert "removed 1 old tool-result file(s)" in report.summary()

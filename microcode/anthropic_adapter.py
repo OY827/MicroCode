@@ -6,7 +6,8 @@ from typing import Any, Callable
 from microcode.api_client import post_json, post_sse
 from microcode.config import ModelConfig
 from microcode.tooling import ToolRegistry
-from microcode.types import AgentStep, ChatMessage, ToolCall
+from microcode.types import AgentStep, ChatMessage, TokenUsage, ToolCall
+from microcode.usage import read_anthropic_stream_usage, usage_from_anthropic
 
 
 def anthropic_messages_url(base_url: str) -> str:
@@ -132,9 +133,10 @@ def parse_anthropic_response(data: dict[str, Any]) -> AgentStep:
             )
 
     content = "\n".join(text_parts).strip()
+    usage = usage_from_anthropic(data)
     if calls:
-        return AgentStep(type="tool_calls", content=content, calls=calls)
-    return AgentStep(type="assistant", content=content)
+        return AgentStep(type="tool_calls", content=content, calls=calls, usage=usage)
+    return AgentStep(type="assistant", content=content, usage=usage)
 
 
 def consume_anthropic_stream(
@@ -145,10 +147,17 @@ def consume_anthropic_stream(
 
     texts: dict[int, str] = {}
     tools: dict[int, dict[str, Any]] = {}
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
     for event in events:
         if not isinstance(event, dict):
             continue
+        inp, out = read_anthropic_stream_usage(event)
+        if inp is not None:
+            input_tokens = inp
+        if out is not None:
+            output_tokens = out
         if event.get("type") == "message" and isinstance(event.get("content"), list):
             step = parse_anthropic_response(event)
             if on_text_delta and step.content:
@@ -178,9 +187,12 @@ def consume_anthropic_stream(
         )
 
     content = "\n".join(text_parts).strip()
+    usage = None
+    if input_tokens or output_tokens:
+        usage = TokenUsage(input_tokens=input_tokens or 0, output_tokens=output_tokens or 0)
     if calls:
-        return AgentStep(type="tool_calls", content=content, calls=calls)
-    return AgentStep(type="assistant", content=content)
+        return AgentStep(type="tool_calls", content=content, calls=calls, usage=usage)
+    return AgentStep(type="assistant", content=content, usage=usage)
 
 
 def _apply_anthropic_event(
